@@ -1,0 +1,12 @@
+# Datasets, caches, weights, results: large and regenerable, never committed
+data/
+cache/
+weights/
+checkpoints/
+outputs/
+.tmp/
+
+# Python / Jupyter
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
