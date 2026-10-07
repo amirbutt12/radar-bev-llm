@@ -88,6 +88,10 @@ class RadarPillarNet(nn.Module):
         self.reg_head = nn.Sequential(block(64, 64), nn.Conv2d(64, n_reg, 1))
         nn.init.constant_(self.hm_head[-1].bias, -2.19)      # start with "almost nothing here" (p ~ 0.1), standard for focal loss
 
+    def features(self, points, mask):
+        """(B, 64, 128, 128) BEV feature map, i.e. everything before the two heads."""
+        return self.backbone(self.encoder(points, mask))
+
     def forward(self, points, mask):
-        feat = self.backbone(self.encoder(points, mask))
+        feat = self.features(points, mask)
         return dict(hm=self.hm_head(feat), reg=self.reg_head(feat))

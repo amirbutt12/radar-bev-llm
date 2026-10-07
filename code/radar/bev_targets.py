@@ -47,6 +47,33 @@ def get_boxes(nusc, sample_token, grid):
     return np.array(rows, dtype=np.float32).reshape(-1, 6)
 
 
+def get_velocities(nusc, sample_token, grid):
+    """(M, 3) [class, vx, vy] in the ego frame (m/s) of the same cars / pedestrians get_boxes() would return.
+    Boxes at the start/end of their track (nuScenes cannot compute a velocity there) are skipped."""
+    sample = nusc.get("sample", sample_token)
+    ego = nusc.get("ego_pose", nusc.get("sample_data", sample["data"]["LIDAR_TOP"])["ego_pose_token"])
+    q_ego = Quaternion(ego["rotation"])
+    t_ego = np.array(ego["translation"])
+    x_max = grid["x0"] + grid["nx"] * grid["cell"]
+    y_max = grid["y0"] + grid["ny"] * grid["cell"]
+
+    rows = []
+    for ann_token in sample["anns"]:
+        ann = nusc.get("sample_annotation", ann_token)
+        cls = category_to_class(ann["category_name"])
+        if cls is None:
+            continue
+        x, y, _ = q_ego.inverse.rotate(np.array(ann["translation"]) - t_ego)
+        if not (grid["x0"] <= x < x_max and grid["y0"] <= y < y_max):
+            continue
+        v_global = nusc.box_velocity(ann_token)
+        if np.isnan(v_global).any():
+            continue
+        vx, vy, _ = q_ego.inverse.rotate(v_global)
+        rows.append([cls, vx, vy])
+    return np.array(rows, dtype=np.float32).reshape(-1, 3)
+
+
 def make_targets(boxes, grid):
     """boxes (M, 6) -> heatmap (2, nx, ny), reg (6, nx, ny), reg_mask (nx, ny). Grid layout as in pillarize()."""
     nx, ny, cell = grid["nx"], grid["ny"], grid["cell"]

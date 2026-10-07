@@ -74,6 +74,24 @@ def to_device(batch, device):
     return {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in batch.items()}
 
 
+def mirror_batch(batch, flip):
+    """Mirror the scene left <-> right (y -> -y) for the frames where `flip` is True; points and targets stay consistent.
+
+    Points: y and vy change sign (x, z, v_r, rcs, dt do not: radial speed is the same in a mirror).
+    Targets: the maps are flipped along y; the sideways centre offset (dy) and sin(yaw) change sign.
+    Works in place on the batch tensors, which `collate` builds fresh for every batch.
+    """
+    f = flip.to(batch["points"].device)
+    batch["points"][f, :, 1] *= -1
+    batch["points"][f, :, 4] *= -1
+    batch["heatmap"][f] = batch["heatmap"][f].flip(-1)
+    batch["reg"][f] = batch["reg"][f].flip(-1)
+    batch["reg"][f, 1] *= -1
+    batch["reg"][f, 4] *= -1
+    batch["reg_mask"][f] = batch["reg_mask"][f].flip(-1)
+    return batch
+
+
 @torch.no_grad()
 def evaluate(model, items, device, batch_size=8, thr=2.0):
     """Mean loss and per-class AP (centre distance < thr metres) over a list of dataset items."""
@@ -89,8 +107,9 @@ def evaluate(model, items, device, batch_size=8, thr=2.0):
     return dict(loss=total, hm=hm, reg=rg, ap_car=average_precision(preds, gts, 0, thr), ap_ped=average_precision(preds, gts, 1, thr))
 
 
-def train(model, train_items, val_items, device, epochs=20, batch_size=8, lr=2e-3, seed=0, log=print):
-    """Plain AdamW + cosine schedule. Returns one dict per epoch."""
+def train(model, train_items, val_items, device, epochs=20, batch_size=8, lr=2e-3, seed=0, log=print, mirror=False):
+    """AdamW + one-cycle schedule. mirror=True flips every training frame left <-> right with probability 0.5.
+    Returns one dict per epoch."""
     torch.manual_seed(seed)
     rng = np.random.default_rng(seed)
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-2)
@@ -103,6 +122,8 @@ def train(model, train_items, val_items, device, epochs=20, batch_size=8, lr=2e-
         order = rng.permutation(len(train_items))
         for i in range(0, len(order), batch_size):
             batch = to_device(collate([train_items[j] for j in order[i:i + batch_size]]), device)
+            if mirror:
+                batch = mirror_batch(batch, torch.rand(len(batch["token"])) < 0.5)
             loss, hm, rg = compute_loss(model(batch["points"], batch["mask"]), batch)
             opt.zero_grad(set_to_none=True)
             loss.backward()
