@@ -5,11 +5,14 @@ Unlike nuScenes-QA's questions (existence, count, object, status, comparison), t
     moving_count_car / moving_count_pedestrian   "How many cars/pedestrians are moving in the scene?"   -> a count
     top_speed_car                                "How fast is the fastest moving car: slow or fast?"    -> none / slow / fast
 
-Written to cache/nuscenes_qa_motion_<split>.json, split the same way as the official nuScenes-QA cache (by looking up
-which split each keyframe already belongs to there), so a keyframe's motion questions and its regular questions agree.
+Written to cache/nuscenes_qa_<out-tag>_<split>.json, split the same way as the official nuScenes-QA cache for
+--feat-tag (by looking up which split each keyframe already belongs to there), so a keyframe's motion questions and
+its regular questions agree.
 
-    python make_motion_qa.py
+    python make_motion_qa.py                                                     # mini
+    python make_motion_qa.py --version v1.0-trainval --feat-tag trainval_bev --out-tag motion_trainval
 """
+import argparse
 import json
 
 import numpy as np
@@ -23,11 +26,17 @@ FAST = 8.0       # m/s: above this a moving car counts as "fast" rather than "sl
 
 
 def main():
-    nusc = NuScenes("v1.0-mini", str(ROOT / "data" / "nuscenes"), verbose=False)
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--version", default="v1.0-mini")
+    ap.add_argument("--feat-tag", default="mini_mirror", help="matches the bev_features cache tag, used to recover the official split")
+    ap.add_argument("--out-tag", default="motion")
+    args = ap.parse_args()
+
+    nusc = NuScenes(args.version, str(ROOT / "data" / "nuscenes"), verbose=False)
 
     token_split = {}
     for split in ("train", "val"):
-        for q in json.load(open(ROOT / "cache" / f"nuscenes_qa_mini_mirror_{split}.json", encoding="utf-8")):
+        for q in json.load(open(ROOT / "cache" / f"nuscenes_qa_{args.feat_tag}_{split}.json", encoding="utf-8")):
             token_split[q["sample_token"]] = split
 
     out = {"train": [], "val": []}
@@ -49,7 +58,7 @@ def main():
         ]
 
     for split, qs in out.items():
-        path = ROOT / "cache" / f"nuscenes_qa_motion_{split}.json"
+        path = ROOT / "cache" / f"nuscenes_qa_{args.out_tag}_{split}.json"
         json.dump(qs, open(path, "w", encoding="utf-8"))
         n_tok = len({q["sample_token"] for q in qs})
         print(f"{split}: {len(qs)} motion questions over {n_tok} keyframes -> {path}")

@@ -79,6 +79,7 @@ def main():
     ap.add_argument("--camera-tag", default="", help="e.g. mini_clip; empty = no camera tokens")
     ap.add_argument("--motion-tag", default="", help="e.g. mini_obj; empty = no explicit per-object motion tokens")
     ap.add_argument("--motion-qa", action="store_true", help="also train/eval on the auto-generated speed questions (make_motion_qa.py)")
+    ap.add_argument("--motion-qa-tag", default="motion", help="matches make_motion_qa.py's --out-tag")
     ap.add_argument("--llm", default=str(ROOT / "weights" / "Qwen2.5-0.5B-Instruct"))
     ap.add_argument("--epochs", type=int, default=5)
     ap.add_argument("--bs", type=int, default=16)
@@ -97,7 +98,7 @@ def main():
     feat_dir = ROOT / "cache" / "bev_features" / args.feat_tag
     cam_dir = ROOT / "cache" / "camera_features" / args.camera_tag if args.camera_tag else None
     motion_dir = ROOT / "cache" / "motion_tokens" / args.motion_tag if args.motion_tag else None
-    extra = lambda split: [ROOT / "cache" / f"nuscenes_qa_motion_{split}.json"] if args.motion_qa else []
+    extra = lambda split: [ROOT / "cache" / f"nuscenes_qa_{args.motion_qa_tag}_{split}.json"] if args.motion_qa else []
     train_ds = QADataset("train", feat_dir, cam_dir, extra("train"), motion_dir)
     val_ds = QADataset("val", feat_dir, cam_dir, extra("val"), motion_dir)
     if args.limit:
@@ -143,6 +144,13 @@ def main():
         res = evaluate(model, val_ds)
         history.append(dict(epoch=epoch + 1, train_loss=float(np.mean(losses)), val_acc=res["acc"]))
         print(f"epoch {epoch + 1}/{args.epochs} | train loss {np.mean(losses):.3f} | val accuracy {res['acc']:.3f} | {time.time() - t0:.0f}s", flush=True)
+        # save after every epoch: a hang or crash mid-run then loses minutes, not hours
+        keep = {n: p for n, p in model.named_parameters() if p.requires_grad}
+        torch.save(keep, ROOT / "checkpoints" / f"qa_{args.name}.pt")
+        (ROOT / "outputs").mkdir(exist_ok=True)
+        json.dump(dict(name=args.name, vision=not args.no_vision, camera=use_camera, motion=use_motion,
+                       motion_qa=args.motion_qa, history=history, in_progress=True),
+                  open(ROOT / "outputs" / f"qa_{args.name}.json", "w"), indent=1)
 
     final = evaluate(model, val_ds)
     result = dict(name=args.name, vision=not args.no_vision, camera=use_camera, motion=use_motion, motion_qa=args.motion_qa,

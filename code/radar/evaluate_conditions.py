@@ -33,6 +33,7 @@ def main():
     ap.add_argument("--version", default="v1.0-trainval")
     ap.add_argument("--subsample", type=int, default=60000)
     ap.add_argument("--val-subsample", type=int, default=6000)
+    ap.add_argument("--motion-qa-tag", default="motion_trainval", help="matches train_qa.py's --motion-qa-tag for this run")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--gpu", type=int, default=0)
     args = ap.parse_args()
@@ -41,16 +42,21 @@ def main():
     feat_dir = ROOT / "cache" / "bev_features" / "trainval_bev"
     cam_dir = ROOT / "cache" / "camera_features" / "trainval_clip" if cfg["camera"] else None
     motion_dir = ROOT / "cache" / "motion_tokens" / "trainval_obj" if cfg["motion"] else None
+    motion_qa = cfg.get("motion_qa", False)
+    extra_val = [ROOT / "cache" / f"nuscenes_qa_{args.motion_qa_tag}_val.json"] if motion_qa else []
+    extra_train_path = ROOT / "cache" / f"nuscenes_qa_{args.motion_qa_tag}_train.json"
 
-    # consume the rng exactly as train_qa.py does, so the validation subsample is the same one training evaluated on
-    rng = np.random.default_rng(args.seed)
+    # consume the rng exactly as train_qa.py does (train draw first, then val), so the val subsample matches training's
     n_train = len(load_mini_questions("train", feat_dir))
+    if motion_qa:
+        n_train += len(json.load(open(extra_train_path, encoding="utf-8")))
+    rng = np.random.default_rng(args.seed)
     if args.subsample and args.subsample < n_train:
         rng.choice(n_train, args.subsample, replace=False)
-    n_val = len(load_mini_questions("val", feat_dir))
-    keep = sorted(rng.choice(n_val, args.val_subsample, replace=False)) if args.val_subsample < n_val else list(range(n_val))
 
-    val_ds = QADataset("val", feat_dir, cam_dir, (), motion_dir)
+    val_ds = QADataset("val", feat_dir, cam_dir, extra_val, motion_dir)
+    n_val = len(val_ds.questions)
+    keep = sorted(rng.choice(n_val, args.val_subsample, replace=False)) if args.val_subsample < n_val else list(range(n_val))
     val_ds.questions = [val_ds.questions[i] for i in keep]
 
     nusc = NuScenes(args.version, str(ROOT / "data" / "nuscenes"), verbose=False)
