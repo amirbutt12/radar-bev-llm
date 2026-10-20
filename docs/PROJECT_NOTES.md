@@ -3,7 +3,8 @@
 
 **Project:** Paper 1 - a radar-led, camera-assisted bird's-eye-view (BEV) language model that answers questions
 about a driving scene, built and evaluated on nuScenes.
-**Status as of:** 2026-10-21 (Part VII added: the real-detector stress test)
+**Status as of:** 2026-10-21 (Part VII added and extended: the real-detector stress test, now including a third
+isolation test of a confidence-score object-token feature - also a negative result for pedestrian-counting)
 **Code:** `D:\radar-bev-llm\code\radar\` (scripts) and `D:\radar-bev-llm\code\notebooks\` (01-06, annotated)
 **Repo:** https://github.com/amirbutt12/radar-bev-llm (branch `main`)
 
@@ -847,18 +848,48 @@ ground truth and has not yet held up with the project's own detector, and two ch
 failed to change that. This should be reported as an open question, not folded into the headline claim as if
 settled. See the updated Part VI priority list below.
 
+### A third fix, also tried: the detection confidence score (added 2026-10-21)
+
+The top-priority item from the original version of this section - adding the detector's own confidence score as
+an explicit object-token feature, so the model could learn to trust a strong detection more than a weak one - has
+since been implemented and tested. `motion_tokens.py`'s per-slot feature vector grew from 8 to 9 numbers
+(`[is_car, is_pedestrian, x, y, vx, vy, speed, has_radar_points, confidence]`); `confidence` is the detector's own
+sigmoid score for a detected box, or 1.0 for an oracle/ground-truth box. `make_detections_cache.py` now keeps the
+score column instead of discarding it, and `RadarLLM`'s motion projector input widened to match.
+
+All three box-source configurations were retrained with the new 9-dimension token:
+
+| config (with confidence feature) | final accuracy | wrong-frame gap | car | pedestrian | speed |
+|---|---|---|---|---|---|
+| oracle boxes | 0.570 | +0.081 | 0.40 | 0.51 | 0.72 |
+| detected, 0.3 threshold, balanced slots | 0.541 | +0.048 | 0.37 | 0.36 | 0.69 |
+| detected, 0.15 threshold, balanced slots | 0.553 | +0.050 | 0.39 | 0.35 | 0.68 |
+
+**Pedestrian-counting still did not move.** It is flat at 0.35-0.36 for both real-detector configurations -
+essentially unchanged from the pre-confidence numbers (0.37 and 0.36 respectively) and nowhere close to the
+oracle-boxes result. Giving the model a trust signal for each detection made no measurable difference, even at
+the 0.15 threshold where more than three-quarters of the "pedestrian" detections are false positives. (The oracle
+row's jump to 0.51 is not attributable to the new feature in any meaningful sense - the confidence value for an
+oracle box is the constant 1.0 on every single token, so it carries no information; the move from 0.45 to 0.51 is
+run-to-run training variance, a reminder of exactly why Part VI item 3 - multi-seed confidence intervals - still
+matters before any of these specific numbers go in the paper.)
+
+Car-counting improved somewhat across both real-detector configurations (0.37-0.39, up from 0.35-0.37), but this
+reads as general extra model capacity/signal from the added feature dimension rather than anything
+pedestrian-specific, since the one metric the fix directly targeted did not respond.
+
 ### Updated priorities (supersedes Part VI's list where they overlap)
 
-1. **Add the detection confidence score as an explicit object-token feature.** Right now a shaky, low-confidence
-   detection and a solid one look identical to the model except for position and velocity - this is the most
-   likely reason the lower-threshold fix didn't help, since the model has no signal to downweight the flood of
-   new false positives it just received. Not attempted yet: a real code and schema change, not a config tweak.
-2. **Retrain the detector itself**, with more epochs and a real precision/recall sweep instead of a guessed
-   threshold - pedestrian recall (0.11 at the current operating point) is weak enough that no amount of downstream
-   token-handling cleverness may fully compensate for it.
-3. Everything else in Part VI's list (seeds/confidence intervals, scaling the training budget, the larger LLM
-   question) still stands, now informed by this result: **prioritize fixing pedestrian detection and giving the
-   model confidence awareness before spending compute on scaling the current, still-flawed pipeline further.**
+1. **Retrain the detector itself**, with more epochs and a real precision/recall sweep instead of a guessed
+   threshold. This is now the only one of the three cheap fixes not yet tried, and the only remaining explanation
+   consistent with the evidence: pedestrian recall (0.11 at the current operating point) is weak enough that no
+   amount of downstream token-handling cleverness - slot allocation, detection threshold, or now confidence
+   awareness - has been able to compensate for it. All three were tried, independently, and all three left the
+   pedestrian number in the same narrow 0.35-0.37 band.
+2. Everything else in Part VI's list (seeds/confidence intervals, scaling the training budget, the larger LLM
+   question) still stands, now informed by this result: **the pedestrian-counting problem is very likely a
+   detector-quality problem, not an architecture or token-design problem, and should be treated as such before
+   any further token-side changes are attempted.**
 
 ---
 

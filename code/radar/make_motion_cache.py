@@ -1,5 +1,5 @@
 """Cache explicit per-object motion tokens (see motion_tokens.py) for every keyframe of a nuScenes version:
-cache/motion_tokens/<tag>/<sample_token>.npy, each (8, 8) float32.
+cache/motion_tokens/<tag>/<sample_token>.npy, each (8, 9) float32.
 
     python make_motion_cache.py --tag mini_obj                                            # oracle: ground-truth boxes
     python make_motion_cache.py --version v1.0-trainval --tag trainval_obj_det \

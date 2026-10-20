@@ -13,7 +13,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 class RadarLLM(nn.Module):
     def __init__(self, llm_dir, use_vision=True, lora_r=16, feat_dim=64, side=16, use_camera=False, cam_dim=768, cam_tokens=49,
-                 use_motion=False, motion_dim=8, motion_slots=8):
+                 use_motion=False, motion_dim=9, motion_slots=8):
         super().__init__()
         self.use_vision, self.side = use_vision, side
         self.use_camera, self.cam_tokens = use_camera, cam_tokens
@@ -51,7 +51,7 @@ class RadarLLM(nn.Module):
         return self.cam_projector(cam_feats.float()) + self.cam_pos
 
     def object_tokens(self, motion_feats):
-        """(B, motion_slots, motion_dim) cached per-object [class, x, y, vx, vy, speed, has_points] -> (B, motion_slots, hidden)."""
+        """(B, motion_slots, motion_dim) cached per-object [class, x, y, vx, vy, speed, has_points, confidence] -> (B, motion_slots, hidden)."""
         return self.motion_projector(motion_feats.float()) + self.motion_pos
 
     def _n_prefix(self):

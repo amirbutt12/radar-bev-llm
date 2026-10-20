@@ -1,5 +1,7 @@
 """Run the trained radar detector over every keyframe of a split and cache its DECODED, predicted boxes
-(not ground truth) to disk: cache/detected_boxes/<tag>/<token>.npy, each (M, 6) float32 [class, x, y, w, l, yaw].
+(not ground truth) to disk: cache/detected_boxes/<tag>/<token>.npy, each (M, 7) float32
+[class, x, y, w, l, yaw, score] -- the trailing score lets motion_tokens.py give the object token a confidence
+feature instead of treating every detection as equally real.
 
 Used to rebuild the motion-token cache from the detector's own predictions instead of oracle ground-truth boxes,
 to test whether the pedestrian-motion finding survives a realistic end-to-end pipeline (make_motion_cache.py
@@ -47,7 +49,7 @@ def main():
             out = net(batch["points"].to(device), batch["mask"].to(device))
             preds = decode(out, GRID, min_score=args.min_score)
             for token, p in zip(batch["token"], preds):
-                boxes = p[:, [0, 2, 3, 4, 5, 6]].astype(np.float32)   # drop the score column -> [cls, x, y, w, l, yaw]
+                boxes = p[:, [0, 2, 3, 4, 5, 6, 1]].astype(np.float32)   # reorder -> [cls, x, y, w, l, yaw, score]
                 np.save(out_dir / f"{token}.npy", boxes)
                 n += 1
                 n_with_det += int(len(boxes) > 0)
