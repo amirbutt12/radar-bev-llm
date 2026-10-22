@@ -107,8 +107,11 @@ def evaluate(model, items, device, batch_size=8, thr=2.0):
     return dict(loss=total, hm=hm, reg=rg, ap_car=average_precision(preds, gts, 0, thr), ap_ped=average_precision(preds, gts, 1, thr))
 
 
-def train(model, train_items, val_items, device, epochs=20, batch_size=8, lr=2e-3, seed=0, log=print, mirror=False):
+def train(model, train_items, val_items, device, epochs=20, batch_size=8, lr=2e-3, seed=0, log=print, mirror=False,
+          ckpt_path=None):
     """AdamW + one-cycle schedule. mirror=True flips every training frame left <-> right with probability 0.5.
+    ckpt_path, if given, is overwritten with the model's state_dict after every epoch (crash/hang resilience for a
+    long unattended run -- a saved checkpoint is never more than one epoch stale).
     Returns one dict per epoch."""
     torch.manual_seed(seed)
     rng = np.random.default_rng(seed)
@@ -136,4 +139,6 @@ def train(model, train_items, val_items, device, epochs=20, batch_size=8, lr=2e-
         history.append(dict(epoch=epoch + 1, train_loss=tr[0], train_hm=tr[1], train_reg=tr[2], **{f"val_{k}": v for k, v in va.items()}))
         log(f"epoch {epoch + 1:2d}/{epochs} | train loss {tr[0]:.3f} (hm {tr[1]:.3f} reg {tr[2]:.3f}) | val loss {va['loss']:.3f} "
             f"| val AP@2m car {va['ap_car']:.3f} ped {va['ap_ped']:.3f} | {time.time() - t0:.0f}s")
+        if ckpt_path is not None:
+            torch.save(model.state_dict(), ckpt_path)
     return history

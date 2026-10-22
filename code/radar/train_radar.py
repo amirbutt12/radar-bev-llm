@@ -52,9 +52,8 @@ def main():
 
     torch.manual_seed(args.seed)
     net = RadarPillarNet().to(device)
-    T.train(net, train_items, val_items, device, epochs=args.epochs, seed=args.seed, mirror=args.mirror)
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
-    torch.save(net.state_dict(), args.out)
+    T.train(net, train_items, val_items, device, epochs=args.epochs, seed=args.seed, mirror=args.mirror, ckpt_path=args.out)
     print("saved", args.out, flush=True)
 
 

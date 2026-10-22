@@ -3,8 +3,10 @@
 
 **Project:** Paper 1 - a radar-led, camera-assisted bird's-eye-view (BEV) language model that answers questions
 about a driving scene, built and evaluated on nuScenes.
-**Status as of:** 2026-10-21 (Part VII added and extended: the real-detector stress test, now including a third
-isolation test of a confidence-score object-token feature - also a negative result for pedestrian-counting)
+**Status as of:** 2026-10-22 (Part VII complete: the real-detector stress test, including four independent and
+isolated fix attempts for pedestrian-counting - slot balancing, detection threshold, confidence-score token,
+and detector retraining with a PR sweep - all four negative, pointing to a likely sensor-level limit for
+pedestrians rather than a fixable pipeline problem)
 **Code:** `D:\radar-bev-llm\code\radar\` (scripts) and `D:\radar-bev-llm\code\notebooks\` (01-06, annotated)
 **Repo:** https://github.com/amirbutt12/radar-bev-llm (branch `main`)
 
@@ -890,6 +892,70 @@ pedestrian-specific, since the one metric the fix directly targeted did not resp
    question) still stands, now informed by this result: **the pedestrian-counting problem is very likely a
    detector-quality problem, not an architecture or token-design problem, and should be treated as such before
    any further token-side changes are attempted.**
+
+### The fourth fix, also tried: retraining the detector itself (added 2026-10-22)
+
+The one remaining item from the list above - retraining the detector properly, with more epochs and a real
+precision/recall sweep instead of a guessed threshold - has now been tried too, and it closes the question rather
+than opening a new direction.
+
+The original detector was trained for 8 epochs. It was retrained from scratch for 20 epochs (2.5x), with
+per-epoch checkpointing added to `train.py`/`train_radar.py` first (a crash/hang safety net that was missing
+before - a long detector run had no mid-run recovery point until now). The result:
+
+| | original (8 epochs) | retrained (20 epochs) |
+|---|---|---|
+| car AP@2m | 0.385 | 0.378 (peaked 0.383 at epoch 14) |
+| pedestrian AP@2m | 0.120 | 0.109 (peaked 0.118 at epoch 11) |
+
+Both numbers **plateaued by epoch 7-9** and merely oscillated within noise for the remaining 11-13 epochs of
+training. More training bought nothing measurable, for either class.
+
+A full precision/recall sweep (7 thresholds, 0.05 to 0.40, 500 sampled val keyframes, same methodology as the
+per-class diagnostic earlier in this Part) was also run on the retrained detector, specifically to check whether
+a better pedestrian operating point exists anywhere on the curve that the original single-threshold choice might
+have missed:
+
+| threshold | pedestrian precision | pedestrian recall |
+|---|---|---|
+| 0.05 | 0.041 | 0.267 |
+| 0.15 | 0.120 | 0.177 |
+| 0.30 | 0.471 | 0.104 |
+| 0.40 | 0.679 | 0.081 |
+
+There is no good point on this curve. Recall never exceeds roughly 27%, and only at a precision of 4% (96% of
+"pedestrian" detections at that setting are false alarms). This is not a threshold-tuning problem - the model's
+underlying ability to *separate* real pedestrians from noise and clutter is weak across the entire operating
+range, not just at the one threshold used throughout this project.
+
+**All four candidate fixes for the pedestrian-counting problem have now been tried, independently, and all four
+failed:** class-balanced object-token slots, a lower detection threshold, a confidence-score token feature, and
+now 2.5x more detector training with a full PR sweep. This is a strong, convergent result pointing to one
+conclusion: **the bottleneck is not the language model's architecture, the object-token design, or the amount of
+detector training - it is the information content of cheap, sparse automotive radar for a low-radar-cross-section,
+non-metallic, irregularly-shaped target like a pedestrian.** This reading is independently corroborated by a
+contemporary paper reviewed alongside this result (RFusion4D, Liang et al., IEEE OJITS 2026): even with a far
+higher-resolution 4D imaging radar, 2 million training frames, a dedicated signal-domain denoising module, and
+confidence-aware temporal fusion, their reported pedestrian AP under adverse weather is only 7.08% (up from a
+5.47% camera-only baseline) - a real relative improvement, but a strikingly low absolute number from a much
+better-resourced system. Small, low-reflectivity, vulnerable-road-user targets appear to be a persistent,
+cross-project limitation of radar as a sensing modality, not an artifact of this project's specific choices.
+
+**Practical consequence:** the retrained detector (`radar_pillar_trainval_v2.pt`) is not adopted as the project's
+checkpoint going forward - it performs statistically indistinguishably from the original (`radar_pillar_trainval.pt`)
+on both classes, so there is no reason to re-run the downstream language-model training on its predictions. The
+original checkpoint and all of Part VII's earlier results stand as the reference end-to-end numbers.
+
+**Where this leaves the paper's claims:** the honest, current, and now well-tested position is: radar's
+contribution to car-motion counting and speed judgment is real and robust, confirmed under both oracle and
+realistic (real-detector) conditions. Radar's contribution to pedestrian-motion counting is real and strong under
+oracle conditions only; under realistic conditions it is blocked by a detection-recall ceiling that this project
+has now shown, through four independent and well-isolated attempts, is not fixable by token design, detection
+thresholding, confidence-awareness, or additional detector training - and is plausibly a near-fundamental limit of
+the sensor itself for this target class, not a limitation of this specific pipeline. A natural, honest framing for
+future work (not yet attempted) is suggested by this finding rather than contradicted by it: for vulnerable road
+users specifically, camera should likely lead and radar assist, the reverse of the framing that holds for
+vehicles - rather than one blanket "radar-led" story applied uniformly across every object class.
 
 ---
 
