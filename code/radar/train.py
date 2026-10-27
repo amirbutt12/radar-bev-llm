@@ -23,9 +23,12 @@ def reg_loss(pred, gt, mask):
     return F.l1_loss(pred * m, gt * m, reduction="sum") / (m.sum() * pred.shape[1]).clamp(min=1)
 
 
-def compute_loss(out, batch):
+def compute_loss(out, batch, lidar_weight=1.0):
     hm, rg = focal_loss(out["hm"], batch["heatmap"]), reg_loss(out["reg"], batch["reg"], batch["reg_mask"])
-    return hm + rg, hm.detach(), rg.detach()
+    total = hm + rg
+    if "lidar_occ" in out and "lidar_occ" in batch:
+        total = total + lidar_weight * F.binary_cross_entropy_with_logits(out["lidar_occ"], batch["lidar_occ"])
+    return total, hm.detach(), rg.detach()
 
 
 @torch.no_grad()
@@ -83,12 +86,15 @@ def mirror_batch(batch, flip):
     """
     f = flip.to(batch["points"].device)
     batch["points"][f, :, 1] *= -1
-    batch["points"][f, :, 4] *= -1
+    if batch["points"].shape[-1] > 4:          # radar's lateral velocity column; lidar points carry no velocity
+        batch["points"][f, :, 4] *= -1
     batch["heatmap"][f] = batch["heatmap"][f].flip(-1)
     batch["reg"][f] = batch["reg"][f].flip(-1)
     batch["reg"][f, 1] *= -1
     batch["reg"][f, 4] *= -1
     batch["reg_mask"][f] = batch["reg_mask"][f].flip(-1)
+    if "lidar_occ" in batch:
+        batch["lidar_occ"][f] = batch["lidar_occ"][f].flip(-1)
     return batch
 
 
@@ -108,10 +114,11 @@ def evaluate(model, items, device, batch_size=8, thr=2.0):
 
 
 def train(model, train_items, val_items, device, epochs=20, batch_size=8, lr=2e-3, seed=0, log=print, mirror=False,
-          ckpt_path=None):
+          ckpt_path=None, lidar_weight=1.0):
     """AdamW + one-cycle schedule. mirror=True flips every training frame left <-> right with probability 0.5.
     ckpt_path, if given, is overwritten with the model's state_dict after every epoch (crash/hang resilience for a
-    long unattended run -- a saved checkpoint is never more than one epoch stale).
+    long unattended run -- a saved checkpoint is never more than one epoch stale). lidar_weight scales the
+    auxiliary LiDAR-occupancy loss, when the model and batches carry one (see compute_loss).
     Returns one dict per epoch."""
     torch.manual_seed(seed)
     rng = np.random.default_rng(seed)
@@ -127,7 +134,7 @@ def train(model, train_items, val_items, device, epochs=20, batch_size=8, lr=2e-
             batch = to_device(collate([train_items[j] for j in order[i:i + batch_size]]), device)
             if mirror:
                 batch = mirror_batch(batch, torch.rand(len(batch["token"])) < 0.5)
-            loss, hm, rg = compute_loss(model(batch["points"], batch["mask"]), batch)
+            loss, hm, rg = compute_loss(model(batch["points"], batch["mask"]), batch, lidar_weight)
             opt.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 10.0)

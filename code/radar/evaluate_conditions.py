@@ -34,6 +34,7 @@ def main():
     ap.add_argument("--subsample", type=int, default=60000)
     ap.add_argument("--val-subsample", type=int, default=6000)
     ap.add_argument("--motion-qa-tag", default="motion_trainval", help="matches train_qa.py's --motion-qa-tag for this run")
+    ap.add_argument("--motion-tag", default="trainval_obj", help="matches train_qa.py's --motion-tag for this run (e.g. trainval_obj for oracle, trainval_obj_det_balanced for detected boxes)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--gpu", type=int, default=0)
     args = ap.parse_args()
@@ -41,7 +42,7 @@ def main():
     cfg = json.load(open(ROOT / "outputs" / f"qa_{args.name}.json", encoding="utf-8"))
     feat_dir = ROOT / "cache" / "bev_features" / "trainval_bev"
     cam_dir = ROOT / "cache" / "camera_features" / "trainval_clip" if cfg["camera"] else None
-    motion_dir = ROOT / "cache" / "motion_tokens" / "trainval_obj" if cfg["motion"] else None
+    motion_dir = ROOT / "cache" / "motion_tokens" / args.motion_tag if cfg["motion"] else None
     motion_qa = cfg.get("motion_qa", False)
     extra_val = [ROOT / "cache" / f"nuscenes_qa_{args.motion_qa_tag}_val.json"] if motion_qa else []
     extra_train_path = ROOT / "cache" / f"nuscenes_qa_{args.motion_qa_tag}_train.json"

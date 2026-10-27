@@ -15,7 +15,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from nuscenes.utils.data_classes import RadarPointCloud
+from nuscenes.utils.data_classes import LidarPointCloud, RadarPointCloud
 from nuscenes.utils.splits import create_splits_scenes
 from pyquaternion import Quaternion
 from torch.utils.data import Dataset
@@ -68,6 +68,31 @@ def load_keyframe_radar(nusc, sample, n_sweeps=5):
     return np.concatenate([load_radar_sweeps(nusc, sample, s, n_sweeps) for s in RADARS], axis=0)
 
 
+def load_keyframe_lidar(nusc, sample):
+    """(N, 4) [x, y, z, intensity] of the keyframe's own LIDAR_TOP sweep, in the same ego frame bev_targets.py
+    places boxes in (LIDAR_TOP's own ego pose -- nuScenes' canonical per-keyframe reference). Used two ways:
+    as a training-time-only auxiliary target for the radar detector (xyz only, see lidar_occupancy), and as the
+    LidarPillarNet teacher's own input (all 4 columns) -- the teacher itself is also never run at inference."""
+    dataroot = Path(nusc.dataroot)
+    sd = nusc.get("sample_data", sample["data"]["LIDAR_TOP"])
+    pc = LidarPointCloud.from_file(str(dataroot / sd["filename"])).points        # (4, N): x, y, z, intensity
+    R_cs, t_cs = pose(nusc.get("calibrated_sensor", sd["calibrated_sensor_token"]))
+    xyz = R_cs @ pc[:3] + t_cs[:, None]
+    return np.concatenate([xyz, pc[3:4]], axis=0).T.astype(np.float32)
+
+
+def lidar_occupancy(xyz, g=GRID, z_min=-1.0, z_max=3.0):
+    """(N, 3) ego-frame LiDAR points -> (nx, ny) binary occupancy map, restricted to a plausible object-height
+    band (drops ground-plane and overhead returns, which would otherwise dominate and add little)."""
+    m = (xyz[:, 2] > z_min) & (xyz[:, 2] < z_max)
+    ix = np.floor((xyz[m, 0] - g["x0"]) / g["cell"]).astype(int)
+    iy = np.floor((xyz[m, 1] - g["y0"]) / g["cell"]).astype(int)
+    keep = (ix >= 0) & (ix < g["nx"]) & (iy >= 0) & (iy < g["ny"])
+    occ = np.zeros((g["nx"], g["ny"]), dtype=np.float32)
+    occ[ix[keep], iy[keep]] = 1.0
+    return occ
+
+
 def pillarize(pts, g=GRID):
     """(N, 8) ego-frame points -> (len(CHANNELS), nx, ny) BEV map. Dim 1 = x (forward), dim 2 = y (left)."""
     ix = np.floor((pts[:, 0] - g["x0"]) / g["cell"]).astype(int)
@@ -96,8 +121,9 @@ class RadarPillarDataset(Dataset):
     """
 
     def __init__(self, nusc, split="mini_train", n_sweeps=5, cache_dir=ROOT / "cache" / "radar_points", grid=GRID,
-                 drop_first=False, with_targets=False):
+                 drop_first=False, with_targets=False, with_lidar_aux=False):
         self.nusc, self.n_sweeps, self.grid, self.with_targets = nusc, n_sweeps, grid, with_targets
+        self.with_lidar_aux = with_lidar_aux
         scene_names = set(create_splits_scenes()[split])
         self.tokens = []
         for scene in nusc.scene:
@@ -111,6 +137,9 @@ class RadarPillarDataset(Dataset):
                 token = nusc.get("sample", token)["next"]
         self.cache_dir = Path(cache_dir) / f"{nusc.version}_sweeps{n_sweeps}"
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+        if with_lidar_aux:
+            self.lidar_cache_dir = ROOT / "cache" / "lidar_occ" / nusc.version
+            self.lidar_cache_dir.mkdir(parents=True, exist_ok=True)
 
     def __len__(self):
         return len(self.tokens)
@@ -125,6 +154,18 @@ class RadarPillarDataset(Dataset):
         np.save(tmp, pts)
         os.replace(tmp, path)
         return pts
+
+    def lidar_occ(self, token):
+        """(nx, ny) LiDAR occupancy target of a keyframe; computed once, then read from the cache."""
+        path = self.lidar_cache_dir / f"{token}.npy"
+        if path.exists():
+            return np.load(path)
+        xyz = load_keyframe_lidar(self.nusc, self.nusc.get("sample", token))
+        occ = lidar_occupancy(xyz, self.grid)
+        tmp = path.with_name(f"{token}.{os.getpid()}.tmp.npy")
+        np.save(tmp, occ)
+        os.replace(tmp, path)
+        return occ
 
     def prepare(self):
         """Fill the cache for every keyframe. Returns seconds spent."""
@@ -142,6 +183,61 @@ class RadarPillarDataset(Dataset):
             heatmap, reg, reg_mask = make_targets(boxes, self.grid)
             item.update(boxes=torch.from_numpy(boxes), heatmap=torch.from_numpy(heatmap),
                         reg=torch.from_numpy(reg), reg_mask=torch.from_numpy(reg_mask))
+        if self.with_lidar_aux:
+            item["lidar_occ"] = torch.from_numpy(self.lidar_occ(token))
+        return item
+
+
+class LidarPillarDataset(Dataset):
+    """One item per keyframe, LiDAR instead of radar -- the distillation teacher's own dataset. Same splits,
+    targets and grid as RadarPillarDataset (get_boxes/make_targets are sensor-independent), single-sweep LiDAR
+    (already dense enough, no multi-sweep accumulation needed)."""
+
+    def __init__(self, nusc, split="mini_train", cache_dir=ROOT / "cache" / "lidar_points", grid=GRID,
+                 drop_first=False, with_targets=False):
+        self.nusc, self.grid, self.with_targets = nusc, grid, with_targets
+        scene_names = set(create_splits_scenes()[split])
+        self.tokens = []
+        for scene in nusc.scene:
+            if scene["name"] not in scene_names:
+                continue
+            token = scene["first_sample_token"]
+            if drop_first:
+                token = nusc.get("sample", token)["next"]
+            while token:
+                self.tokens.append(token)
+                token = nusc.get("sample", token)["next"]
+        self.cache_dir = Path(cache_dir) / nusc.version
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+
+    def __len__(self):
+        return len(self.tokens)
+
+    def points(self, token):
+        path = self.cache_dir / f"{token}.npy"
+        if path.exists():
+            return np.load(path)
+        pts = load_keyframe_lidar(self.nusc, self.nusc.get("sample", token))
+        tmp = path.with_name(f"{token}.{os.getpid()}.tmp.npy")
+        np.save(tmp, pts)
+        os.replace(tmp, path)
+        return pts
+
+    def prepare(self):
+        t0 = time.time()
+        for token in self.tokens:
+            self.points(token)
+        return time.time() - t0
+
+    def __getitem__(self, i):
+        token = self.tokens[i]
+        pts = self.points(token)
+        item = dict(token=token, points=torch.from_numpy(pts))
+        if self.with_targets:
+            boxes = get_boxes(self.nusc, token, self.grid)
+            heatmap, reg, reg_mask = make_targets(boxes, self.grid)
+            item.update(boxes=torch.from_numpy(boxes), heatmap=torch.from_numpy(heatmap),
+                        reg=torch.from_numpy(reg), reg_mask=torch.from_numpy(reg_mask))
         return item
 
 
@@ -154,9 +250,13 @@ def collate(batch):
         n = len(b["points"])
         points[k, :n] = b["points"]
         mask[k, :n] = True
-    out = dict(token=[b["token"] for b in batch], points=points, mask=mask, bev=torch.stack([b["bev"] for b in batch]))
+    out = dict(token=[b["token"] for b in batch], points=points, mask=mask)
+    if "bev" in batch[0]:
+        out["bev"] = torch.stack([b["bev"] for b in batch])
     if "heatmap" in batch[0]:
         for key in ("heatmap", "reg", "reg_mask"):
             out[key] = torch.stack([b[key] for b in batch])
         out["boxes"] = [b["boxes"] for b in batch]          # (M, 6) per keyframe, M differs -> keep as a list
+    if "lidar_occ" in batch[0]:
+        out["lidar_occ"] = torch.stack([b["lidar_occ"] for b in batch])
     return out

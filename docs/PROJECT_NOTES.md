@@ -3,10 +3,11 @@
 
 **Project:** Paper 1 - a radar-led, camera-assisted bird's-eye-view (BEV) language model that answers questions
 about a driving scene, built and evaluated on nuScenes.
-**Status as of:** 2026-10-22 (Part VII complete: the real-detector stress test, including four independent and
-isolated fix attempts for pedestrian-counting - slot balancing, detection threshold, confidence-score token,
-and detector retraining with a PR sweep - all four negative, pointing to a likely sensor-level limit for
-pedestrians rather than a fixable pipeline problem)
+**Status as of:** 2026-10-27 (Part VII complete and closed: the real-detector stress test, including seven
+independent and isolated fix attempts for pedestrian-counting - slot balancing, detection threshold,
+confidence-score token, detector retraining with a PR sweep, attention-based pillar aggregation, auxiliary
+LiDAR-occupancy supervision, and real cross-modal distillation from a LiDAR teacher - all seven negative,
+converging on a sensor-level limit for pedestrians rather than a fixable pipeline problem)
 **Code:** `D:\radar-bev-llm\code\radar\` (scripts) and `D:\radar-bev-llm\code\notebooks\` (01-06, annotated)
 **Repo:** https://github.com/amirbutt12/radar-bev-llm (branch `main`)
 
@@ -928,34 +929,119 @@ There is no good point on this curve. Recall never exceeds roughly 27%, and only
 underlying ability to *separate* real pedestrians from noise and clutter is weak across the entire operating
 range, not just at the one threshold used throughout this project.
 
-**All four candidate fixes for the pedestrian-counting problem have now been tried, independently, and all four
-failed:** class-balanced object-token slots, a lower detection threshold, a confidence-score token feature, and
-now 2.5x more detector training with a full PR sweep. This is a strong, convergent result pointing to one
-conclusion: **the bottleneck is not the language model's architecture, the object-token design, or the amount of
-detector training - it is the information content of cheap, sparse automotive radar for a low-radar-cross-section,
-non-metallic, irregularly-shaped target like a pedestrian.** This reading is independently corroborated by a
-contemporary paper reviewed alongside this result (RFusion4D, Liang et al., IEEE OJITS 2026): even with a far
-higher-resolution 4D imaging radar, 2 million training frames, a dedicated signal-domain denoising module, and
-confidence-aware temporal fusion, their reported pedestrian AP under adverse weather is only 7.08% (up from a
-5.47% camera-only baseline) - a real relative improvement, but a strikingly low absolute number from a much
-better-resourced system. Small, low-reflectivity, vulnerable-road-user targets appear to be a persistent,
-cross-project limitation of radar as a sensing modality, not an artifact of this project's specific choices.
+After four fixes, the natural next question was whether the bottleneck sits in the detector's *architecture*
+rather than its *training budget* - three more targeted architectural interventions were tried over the following
+days, each going further than the last toward genuinely richer supervision.
 
-**Practical consequence:** the retrained detector (`radar_pillar_trainval_v2.pt`) is not adopted as the project's
-checkpoint going forward - it performs statistically indistinguishably from the original (`radar_pillar_trainval.pt`)
-on both classes, so there is no reason to re-run the downstream language-model training on its predictions. The
-original checkpoint and all of Part VII's earlier results stand as the reference end-to-end numbers.
+### The fifth fix: attention-based pillar aggregation (added 2026-10-23)
 
-**Where this leaves the paper's claims:** the honest, current, and now well-tested position is: radar's
+The pillar encoder originally summarized the points in each cell with a plain max-pool: for each of its 64
+output channels, keep only the single loudest point, discard the rest. A pillar with one strong clutter return
+and one weak-but-real pedestrian point could lose the pedestrian entirely this way. The encoder was rewritten to
+use **learned attention pooling** instead - a per-point score, softmax within each pillar, weighted sum - so the
+network could combine several points gradedly, conditioned on all of a point's features including raw Doppler
+velocity, the single feature prior radar literature (Aptiv's PointNet-based pedestrian work) identifies as most
+discriminative for pedestrians specifically.
+
+| pillar encoder | car AP@2m | pedestrian AP@2m |
+|---|---|---|
+| original (max-pooling, 8 epochs) | 0.385 | 0.120 |
+| attention-pooling (8 epochs) | 0.383 | 0.117 |
+
+No improvement - within noise, if anything marginally worse. This was treated as a diagnostic as much as a fix:
+if pedestrians had several real points being diluted by cruder pooling, smarter aggregation should have recovered
+some signal. It didn't, which argues against "diluted signal" and toward "absent signal" as the dominant failure
+mode - most pedestrians simply have no real radar points landing on them at all, not a confused mix of real and
+noise points within a shared pillar.
+
+### The sixth fix: auxiliary LiDAR-occupancy supervision (added 2026-10-23/24)
+
+The next step tested whether *injecting outside information at training time* - something none of the first five
+fixes attempted - could help. nuScenes' own keyframe LiDAR sweep (already downloaded, 23 GB for keyframes alone)
+was rasterized onto the same BEV grid as a dense occupancy target, and a small auxiliary head was added to the
+detector backbone that learns to predict this LiDAR occupancy map *from radar features alone*, as an extra loss
+term during training only - LiDAR is never touched at inference, and the detector's architecture and parameter
+count at inference time are unchanged.
+
+| pillar encoder | car AP@2m | pedestrian AP@2m |
+|---|---|---|
+| original (8 epochs) | 0.385 | 0.120 |
+| LiDAR-aux occupancy supervision (8 epochs) | 0.384 | 0.118 |
+
+Again, no improvement. Even a dense, LiDAR-derived "here is where real objects are" signal during training did
+not help the network extract more pedestrian information from the same sparse radar input at inference.
+
+### The seventh fix: real cross-modal distillation from a LiDAR teacher (added 2026-10-24/25)
+
+The last and strongest candidate: train a full LiDAR-only "teacher" detector (same CenterNet-style architecture,
+fed LiDAR points instead of radar points - `LidarPillarNet` in `model.py`), confirm it is genuinely much better
+than the radar detector, then distill its knowledge into the radar student via two losses on top of normal
+detection training (`distill_radar.py`, CRKD-style, Song et al., CVPR 2024): a **feature distillation** loss
+(cosine distance between the student's and the frozen teacher's BEV feature maps, directly comparable since both
+networks share the same backbone shape) and a **response distillation** loss (BCE between the student's heatmap
+logits and the teacher's sigmoid heatmap as a soft target, richer than the hard 0/1 box labels alone).
+
+The teacher, trained for 8 epochs on full trainval, is a dramatically better detector:
+
+| detector | car AP@2m | pedestrian AP@2m |
+|---|---|---|
+| radar (ours) | 0.385 | 0.120 |
+| **LiDAR teacher** | **0.720** | **0.400** |
+
+Pedestrian AP more than triples. This is real headroom, not a marginal teacher. The distilled radar student,
+trained for 8 epochs with both distillation losses added to the usual focal+regression loss:
+
+| detector | car AP@2m | pedestrian AP@2m |
+|---|---|---|
+| original radar (baseline) | 0.385 | 0.120 |
+| attention-pooling | 0.383 | 0.117 |
+| LiDAR-aux occupancy | 0.384 | 0.118 |
+| **distilled radar (CRKD-style)** | **0.383** | **0.116** |
+
+Lands in the exact same narrow band as every other attempt - statistically indistinguishable from baseline,
+despite distilling from a teacher nearly 3.3x better on pedestrians. The training log shows the student genuinely
+moved toward the teacher (feature-distillation loss fell from 0.352 to 0.274 over training, response-distillation
+loss from 0.099 to 0.092) - the distillation signal was real and non-trivial, it simply did not translate into
+better detections. Given detector AP did not move at all, the downstream language-model re-evaluation was not run
+on this checkpoint - every prior case where detector AP was unchanged produced an unchanged pedestrian-counting
+result, and there is no reason to expect this case to differ.
+
+**All seven candidate fixes for the pedestrian-counting problem have now been tried, independently, and all seven
+failed:** class-balanced object-token slots, a lower detection threshold, a confidence-score token feature, 2.5x
+more detector training with a full PR sweep, attention-based pillar aggregation, auxiliary LiDAR-occupancy
+supervision, and real cross-modal feature+response distillation from a verified, substantially richer teacher.
+The seventh is the strongest evidence of all: even genuine knowledge transfer from a sensor that triples
+pedestrian AP could not move the radar student's own pedestrian detections. This is close to decisive evidence
+that the limitation lives in the radar student's *input* - if the sparse points needed to recognize a pedestrian
+were never captured in the first place, no amount of smarter aggregation, auxiliary supervision, or distillation
+pressure toward a richer teacher's representation can manufacture detections from information that was never
+there. This reading is independently corroborated by a contemporary paper reviewed alongside this result
+(RFusion4D, Liang et al., IEEE OJITS 2026): even with a far higher-resolution 4D imaging radar, 2 million training
+frames, a dedicated signal-domain denoising module, and confidence-aware temporal fusion, their reported
+pedestrian AP under adverse weather is only 7.08% (up from a 5.47% camera-only baseline) - a real relative
+improvement, but a strikingly low absolute number from a much better-resourced system. Small, low-reflectivity,
+vulnerable-road-user targets appear to be a persistent, cross-project limitation of radar as a sensing modality,
+not an artifact of this project's specific choices.
+
+**Practical consequence:** none of the five experimental checkpoints produced since the original detector
+(`radar_pillar_trainval_v2.pt`, `radar_pillar_trainval_attn.pt`, `radar_pillar_trainval_lidaraux.pt`,
+`lidar_pillar_trainval.pt`, `radar_pillar_trainval_distill.pt`) are adopted as the project's reference checkpoint
+going forward - the first four perform statistically indistinguishably from the original on both classes, and the
+fifth (the LiDAR teacher) is never run at inference. The original `radar_pillar_trainval.pt` and all of Part VII's
+earlier results stand as the reference end-to-end numbers throughout this document and the paper.
+
+**Where this leaves the paper's claims:** the honest, final, and now exhaustively-tested position is: radar's
 contribution to car-motion counting and speed judgment is real and robust, confirmed under both oracle and
 realistic (real-detector) conditions. Radar's contribution to pedestrian-motion counting is real and strong under
 oracle conditions only; under realistic conditions it is blocked by a detection-recall ceiling that this project
-has now shown, through four independent and well-isolated attempts, is not fixable by token design, detection
-thresholding, confidence-awareness, or additional detector training - and is plausibly a near-fundamental limit of
-the sensor itself for this target class, not a limitation of this specific pipeline. A natural, honest framing for
-future work (not yet attempted) is suggested by this finding rather than contradicted by it: for vulnerable road
-users specifically, camera should likely lead and radar assist, the reverse of the framing that holds for
-vehicles - rather than one blanket "radar-led" story applied uniformly across every object class.
+has now shown, through seven independent and well-isolated attempts spanning token design, detection
+thresholding, confidence-awareness, additional detector training, feature aggregation, auxiliary dense
+supervision, and real cross-modal distillation, is not fixable by any of them - and is plausibly a near-fundamental
+limit of the sensor itself for this target class, not a limitation of this specific pipeline. A natural, honest
+framing for future work (not yet attempted) is suggested by this finding rather than contradicted by it: for
+vulnerable road users specifically, camera should likely lead and radar assist, the reverse of the framing that
+holds for vehicles - rather than one blanket "radar-led" story applied uniformly across every object class. This
+investigation is considered closed.
 
 ---
 
@@ -963,10 +1049,12 @@ vehicles - rather than one blanket "radar-led" story applied uniformly across ev
 
 | File | Purpose |
 |---|---|
-| `pillar_dataset.py` | radar sweep loading, multi-sweep accumulation, hand-crafted pillarization, `RadarPillarDataset` |
+| `pillar_dataset.py` | radar sweep loading, multi-sweep accumulation, hand-crafted pillarization, `RadarPillarDataset`; also keyframe LiDAR loading, LiDAR-occupancy rasterization, and `LidarPillarDataset` (Part VII fixes 6-7) |
 | `bev_targets.py` | CenterNet target generation; `get_boxes`, `get_velocities` (ground-truth, used for motion-question generation and object tokens) |
-| `model.py` | `PillarEncoder`, `BEVBackbone` (U-Net), `RadarPillarNet` |
-| `train.py` / `train_radar.py` | detector training loop, mirror augmentation, AP evaluation |
+| `model.py` | `PillarEncoder` (attention-pooling, Part VII fix 5), `BEVBackbone` (U-Net), `RadarPillarNet` (optional LiDAR-occupancy auxiliary head, fix 6), `LidarPillarNet` (the distillation teacher, fix 7) |
+| `train.py` / `train_radar.py` | detector training loop, mirror augmentation, AP evaluation, optional `--lidar-aux` auxiliary loss |
+| `train_lidar.py` | trains the LiDAR-only teacher detector (`LidarPillarNet`), never run at inference |
+| `distill_radar.py` | CRKD-style distillation: trains the radar student against a frozen LiDAR teacher's BEV features and heatmap (feature + response distillation losses) |
 | `make_points_cache.py` / `make_bev_cache.py` / `make_camera_cache.py` / `make_motion_cache.py` | build the four on-disk feature caches (radar points, dense BEV features, CLIP camera features, motion tokens), all version-aware (mini or trainval) |
 | `motion_tokens.py` | explicit per-object motion token extraction; class-balanced slot allocation (added Part VII) |
 | `make_detections_cache.py` | runs the trained detector over all keyframes and caches its real (non-oracle) predicted boxes, for the Part VII realism test |
